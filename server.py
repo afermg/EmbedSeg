@@ -15,6 +15,7 @@ or:
     python server.py ipc:///tmp/embedseg.ipc
 """
 
+import os
 import sys
 from functools import partial
 from typing import Callable
@@ -45,7 +46,7 @@ def setup(
     min_mask_sum: int = 0,
     min_unclustered_sum: int = 0,
     min_object_size: int = 36,
-    device: int | None = None,
+    device: int | str | None = None,
     expected_tile_size: int = 8,
 ) -> tuple[Callable, dict]:
     """Load a 2-D ``BranchedERFNet`` and the matching ``Cluster`` postprocess.
@@ -70,29 +71,36 @@ def setup(
         Standard EmbedSeg clustering thresholds.
     min_mask_sum, min_unclustered_sum, min_object_size : int
         Clustering pruning knobs.
-    device : int | None
-        CUDA device index. ``None`` -> ``cuda:0`` if available, else CPU.
+    device : int | str | None
+        CUDA device index or torch device string. ``None`` selects ``cuda:0``
+        when available and otherwise CPU.
     expected_tile_size : int
         Required divisor for input H/W (EmbedSeg/ERFNet downsamples by 8).
     """
     if device is None:
-        device = 0
-    if torch.cuda.is_available():
-        torch_device = torch.device(int(device))
+        torch_device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    elif isinstance(device, int):
+        torch_device = torch.device(f"cuda:{device}")
     else:
-        torch_device = torch.device("cpu")
+        torch_device = torch.device(device)
+    if torch_device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError(
+            f"CUDA device {torch_device} was requested but CUDA is unavailable"
+        )
 
     from EmbedSeg.models.BranchedERFNet import BranchedERFNet
     from EmbedSeg.utils.utils import Cluster
 
-    model = BranchedERFNet(
-        num_classes=list(num_classes), input_channels=input_channels
-    )
+    model = BranchedERFNet(num_classes=list(num_classes), input_channels=input_channels)
     model.init_output(n_sigma=n_sigma)
     model = model.to(torch_device).eval()
 
     if weights is not None:
-        state = torch.load(weights, map_location=torch_device)
+        if not os.path.exists(weights):
+            raise FileNotFoundError(f"Checkpoint does not exist: {weights}")
+        # Full training checkpoints may contain pickle-based metadata. Only
+        # load checkpoints from trusted sources.
+        state = torch.load(weights, map_location=torch_device, weights_only=False)
         if isinstance(state, dict) and "model_state_dict" in state:
             state = state["model_state_dict"]
         model.load_state_dict(state, strict=False)
@@ -158,6 +166,10 @@ def process(
     validate_input_shape(input_yx, expected_tile_size)
 
     # Drops Z (assumes single Z slice) and pads channels up to expected_channels.
+    if pixels.shape[1] > expected_channels:
+        raise ValueError(
+            f"Expected at most {expected_channels} channels, got {pixels.shape[1]}"
+        )
     pixels = pad_channel_dim(pixels, expected_channels)
     torch_tensor = torch.from_numpy(pixels.copy()).float().to(device)
 
