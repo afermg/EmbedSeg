@@ -134,6 +134,7 @@ def setup(
     return processor, info
 
 
+@torch.inference_mode()
 def process(
     pixels: numpy.ndarray,
     model,
@@ -161,8 +162,7 @@ def process(
     pixels = pad_channel_dim(pixels, expected_channels)
     torch_tensor = torch.from_numpy(pixels.copy()).float().to(device)
 
-    with torch.no_grad():
-        output = model(torch_tensor)
+    output = model(torch_tensor)
 
     # output: (N, 2 + n_sigma + 1, H, W). Cluster operates per-sample.
     labels = numpy.zeros(
@@ -183,7 +183,7 @@ def process(
 
 
 async def main():
-    with pynng.Rep0(listen=address, recv_timeout=300) as sock:
+    with pynng.Rep0(listen=address, recv_timeout=300_000) as sock:
         print(f"EmbedSeg server listening on {address}", flush=True)
         async with trio.open_nursery() as nursery:
             nursery.start_soon(partial(responder, setup=setup), sock)
